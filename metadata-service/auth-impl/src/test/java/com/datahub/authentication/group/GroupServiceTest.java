@@ -26,9 +26,14 @@ import com.linkedin.entity.client.SystemEntityClient;
 import com.linkedin.identity.GroupMembership;
 import com.linkedin.identity.NativeGroupMembership;
 import com.linkedin.identity.RoleMembership;
+import com.linkedin.metadata.aspect.models.graph.RelatedEntities;
+import com.linkedin.metadata.aspect.models.graph.RelatedEntitiesScrollResult;
 import com.linkedin.metadata.entity.EntityService;
 import com.linkedin.metadata.graph.GraphClient;
+import com.linkedin.metadata.graph.GraphFilters;
+import com.linkedin.metadata.graph.GraphService;
 import com.linkedin.metadata.key.CorpGroupKey;
+import com.linkedin.metadata.query.filter.Filter;
 import com.linkedin.metadata.query.filter.RelationshipDirection;
 import com.linkedin.mxe.MetadataChangeProposal;
 import io.datahubproject.metadata.context.OperationContext;
@@ -69,6 +74,7 @@ public class GroupServiceTest {
   private SystemEntityClient _entityClient;
   private EntityService<?> _entityService;
   private GraphClient _graphClient;
+  private GraphService _graphService;
   private GroupService _groupService;
 
   private OperationContext opContext =
@@ -115,18 +121,20 @@ public class GroupServiceTest {
     _entityClient = mock(SystemEntityClient.class);
     _entityService = mock(EntityService.class);
     _graphClient = mock(GraphClient.class);
+    _graphService = mock(GraphService.class);
 
-    _groupService = new GroupService(_entityClient, _entityService, _graphClient);
+    _groupService = new GroupService(_entityClient, _entityService, _graphClient, _graphService);
   }
 
   @Test
   public void testConstructor() {
-    assertThrows(() -> new GroupService(null, _entityService, _graphClient));
-    assertThrows(() -> new GroupService(_entityClient, null, _graphClient));
-    assertThrows(() -> new GroupService(_entityClient, _entityService, null));
+    assertThrows(() -> new GroupService(null, _entityService, _graphClient, _graphService));
+    assertThrows(() -> new GroupService(_entityClient, null, _graphClient, _graphService));
+    assertThrows(() -> new GroupService(_entityClient, _entityService, null, _graphService));
+    assertThrows(() -> new GroupService(_entityClient, _entityService, _graphClient, null));
 
     // Succeeds!
-    new GroupService(_entityClient, _entityService, _graphClient);
+    new GroupService(_entityClient, _entityService, _graphClient, _graphService);
   }
 
   @Test
@@ -232,8 +240,9 @@ public class GroupServiceTest {
     when(_entityClient.batchGetV2NoCache(
             any(OperationContext.class), eq(CORP_USER_ENTITY_NAME), any(), any()))
         .thenReturn(responseWithNativeGroups(USER_URN, _groupUrn));
-    when(_graphClient.getRelatedEntities(any(), any(), any(), anyInt(), anyInt(), any()))
-        .thenReturn(relationshipsPage(0));
+    when(_graphService.scrollRelatedEntities(
+            any(), any(), any(), any(), any(), any(), any(), any()))
+        .thenReturn(memberEdges(null));
 
     _groupService.addUsersToNativeGroup(opContext, List.of(USER_URN), _groupUrn);
 
@@ -256,8 +265,9 @@ public class GroupServiceTest {
     when(_entityClient.batchGetV2NoCache(
             any(OperationContext.class), eq(CORP_USER_ENTITY_NAME), any(), any()))
         .thenReturn(responseWithNativeGroups(USER_URN, _groupUrn));
-    when(_graphClient.getRelatedEntities(any(), any(), any(), anyInt(), anyInt(), any()))
-        .thenReturn(relationshipsPage(1, USER_URN));
+    when(_graphService.scrollRelatedEntities(
+            any(), any(), any(), any(), any(), any(), any(), any()))
+        .thenReturn(memberEdges(null, USER_URN));
 
     _groupService.addUsersToNativeGroup(opContext, List.of(USER_URN), _groupUrn);
 
@@ -275,8 +285,8 @@ public class GroupServiceTest {
 
     _groupService.addUsersToNativeGroup(opContext, List.of(USER_URN), _groupUrn);
 
-    verify(_graphClient, never())
-        .getRelatedEntities(any(), any(), any(), anyInt(), anyInt(), any());
+    verify(_graphService, never())
+        .scrollRelatedEntities(any(), any(), any(), any(), any(), any(), any(), any());
     verify(_entityService, never())
         .restoreIndices(any(OperationContext.class), anySet(), any(), any(), anyBoolean());
   }
@@ -288,7 +298,8 @@ public class GroupServiceTest {
     when(_entityClient.batchGetV2NoCache(
             any(OperationContext.class), eq(CORP_USER_ENTITY_NAME), any(), any()))
         .thenReturn(responseWithNativeGroups(USER_URN, _groupUrn));
-    when(_graphClient.getRelatedEntities(any(), any(), any(), anyInt(), anyInt(), any()))
+    when(_graphService.scrollRelatedEntities(
+            any(), any(), any(), any(), any(), any(), any(), any()))
         .thenThrow(new RuntimeException("graph unavailable"));
 
     _groupService.addUsersToNativeGroup(opContext, List.of(USER_URN), _groupUrn);
@@ -309,8 +320,9 @@ public class GroupServiceTest {
     when(_entityClient.batchGetV2NoCache(
             any(OperationContext.class), eq(CORP_USER_ENTITY_NAME), any(), any()))
         .thenReturn(responseWithNativeGroups(USER_URN, _groupUrn));
-    when(_graphClient.getRelatedEntities(any(), any(), any(), anyInt(), anyInt(), any()))
-        .thenReturn(relationshipsPage(0));
+    when(_graphService.scrollRelatedEntities(
+            any(), any(), any(), any(), any(), any(), any(), any()))
+        .thenReturn(memberEdges(null));
     doThrow(new RuntimeException("index unavailable"))
         .when(_entityService)
         .restoreIndices(any(OperationContext.class), anySet(), any(), any(), anyBoolean());
@@ -706,41 +718,80 @@ public class GroupServiceTest {
   @Test
   public void testGetNativeGroupMembersReturnsSinglePage() throws Exception {
     Urn userA = Urn.createFromString("urn:li:corpuser:a");
-    when(_graphClient.getRelatedEntities(
-            eq(_groupUrn.toString()),
-            eq(ImmutableSet.of(IS_MEMBER_OF_NATIVE_GROUP_RELATIONSHIP_NAME)),
-            eq(RelationshipDirection.INCOMING),
-            anyInt(),
-            anyInt(),
-            eq(ACTOR_URN_STRING)))
-        .thenReturn(relationshipsPage(1, userA));
+    when(_graphService.scrollRelatedEntities(
+            any(), any(), any(), any(), any(), any(), any(), any()))
+        .thenReturn(memberEdges(null, userA));
 
-    assertEquals(_groupService.getNativeGroupMembers(_groupUrn, ACTOR_URN_STRING), List.of(userA));
+    assertEquals(_groupService.getNativeGroupMembers(opContext, _groupUrn), List.of(userA));
+
+    ArgumentCaptor<GraphFilters> filters = ArgumentCaptor.forClass(GraphFilters.class);
+    verify(_graphService)
+        .scrollRelatedEntities(any(), filters.capture(), any(), any(), any(), any(), any(), any());
+    assertEquals(
+        filters.getValue().getRelationshipTypes(),
+        Set.of(IS_MEMBER_OF_NATIVE_GROUP_RELATIONSHIP_NAME));
+    assertEquals(
+        filters.getValue().getRelationshipFilter().getDirection(), RelationshipDirection.INCOMING);
+    assertEquals(
+        criterionValues(filters.getValue().getSourceEntityFilter()), List.of(GROUP_URN_STRING));
+    // No destination filter: every member of the group is wanted here.
+    assertTrue(filters.getValue().getDestinationEntityFilter().getOr().isEmpty());
   }
 
   @Test
-  public void testGetNativeGroupMembersFollowsPagination() throws Exception {
+  public void testGetNativeGroupMembersFollowsScroll() throws Exception {
+    // Paging must follow scrollIds rather than from/size offsets — offset paging is rejected once
+    // from + size passes index.max_result_window, which would fail the read for the largest groups
+    // instead of returning their tail.
     Urn userA = Urn.createFromString("urn:li:corpuser:a");
     Urn userB = Urn.createFromString("urn:li:corpuser:b");
     Urn userC = Urn.createFromString("urn:li:corpuser:c");
-    when(_graphClient.getRelatedEntities(
-            any(), any(), any(), anyInt(), anyInt(), eq(ACTOR_URN_STRING)))
-        .thenReturn(relationshipsPage(3, userA, userB), relationshipsPage(3, userC));
+    when(_graphService.scrollRelatedEntities(
+            any(), any(), any(), any(), any(), any(), any(), any()))
+        .thenReturn(memberEdges("page-2", userA, userB), memberEdges(null, userC));
 
     assertEquals(
-        _groupService.getNativeGroupMembers(_groupUrn, ACTOR_URN_STRING, 2),
-        List.of(userA, userB, userC));
-    verify(_graphClient, times(2))
-        .getRelatedEntities(any(), any(), any(), anyInt(), anyInt(), any());
+        _groupService.getNativeGroupMembers(opContext, _groupUrn, 2), List.of(userA, userB, userC));
+
+    ArgumentCaptor<String> scrollIds = ArgumentCaptor.forClass(String.class);
+    verify(_graphService, times(2))
+        .scrollRelatedEntities(
+            any(), any(), any(), scrollIds.capture(), any(), any(), any(), any());
+    assertEquals(scrollIds.getAllValues(), Arrays.asList(null, "page-2"));
   }
 
   @Test
   public void testGetNativeGroupMembersHandlesNullResponse() {
-    when(_graphClient.getRelatedEntities(
-            any(), any(), any(), anyInt(), anyInt(), eq(ACTOR_URN_STRING)))
+    when(_graphService.scrollRelatedEntities(
+            any(), any(), any(), any(), any(), any(), any(), any()))
         .thenReturn(null);
 
-    assertTrue(_groupService.getNativeGroupMembers(_groupUrn, ACTOR_URN_STRING).isEmpty());
+    assertTrue(_groupService.getNativeGroupMembers(opContext, _groupUrn).isEmpty());
+  }
+
+  @Test
+  public void testAddUsersToNativeGroupChecksEdgesOfRequestedUsersOnly() throws Exception {
+    // The divergence check filters both endpoints, so its cost tracks the size of the request
+    // rather than the size of the group — and it never has to page a large group's membership.
+    when(_entityService.exists(any(OperationContext.class), anyCollection(), eq(true)))
+        .thenReturn(Set.of(USER_URN));
+    when(_entityClient.batchGetV2NoCache(
+            any(OperationContext.class), eq(CORP_USER_ENTITY_NAME), any(), any()))
+        .thenReturn(responseWithNativeGroups(USER_URN, _groupUrn));
+    when(_graphService.scrollRelatedEntities(
+            any(), any(), any(), any(), any(), any(), any(), any()))
+        .thenReturn(memberEdges(null, USER_URN));
+
+    _groupService.addUsersToNativeGroup(opContext, List.of(USER_URN), _groupUrn);
+
+    ArgumentCaptor<GraphFilters> filters = ArgumentCaptor.forClass(GraphFilters.class);
+    verify(_graphService)
+        .scrollRelatedEntities(any(), filters.capture(), any(), any(), any(), any(), any(), any());
+    assertEquals(
+        criterionValues(filters.getValue().getSourceEntityFilter()), List.of(GROUP_URN_STRING));
+    assertEquals(
+        criterionValues(filters.getValue().getDestinationEntityFilter()),
+        List.of(USER_URN.toString()));
   }
 
   private static Map<Urn, EntityResponse> responseWithNativeGroups(Urn userUrn, Urn... groups) {
@@ -758,18 +809,26 @@ public class GroupServiceTest {
                         new EnvelopedAspect().setValue(new Aspect(membership.data()))))));
   }
 
-  private static EntityRelationships relationshipsPage(int total, Urn... members) {
-    EntityRelationshipArray array = new EntityRelationshipArray();
+  private static RelatedEntitiesScrollResult memberEdges(String nextScrollId, Urn... members) {
+    List<RelatedEntities> entities = new ArrayList<>();
     for (Urn member : members) {
-      array.add(
-          new EntityRelationship()
-              .setEntity(member)
-              .setType(IS_MEMBER_OF_NATIVE_GROUP_RELATIONSHIP_NAME));
+      entities.add(
+          new RelatedEntities(
+              IS_MEMBER_OF_NATIVE_GROUP_RELATIONSHIP_NAME,
+              member.toString(),
+              GROUP_URN_STRING,
+              RelationshipDirection.INCOMING,
+              null));
     }
-    return new EntityRelationships()
-        .setStart(0)
-        .setCount(members.length)
-        .setTotal(total)
-        .setRelationships(array);
+    return RelatedEntitiesScrollResult.builder()
+        .entities(entities)
+        .pageSize(entities.size())
+        .numResults(entities.size())
+        .scrollId(nextScrollId)
+        .build();
+  }
+
+  private static List<String> criterionValues(Filter filter) {
+    return filter.getOr().get(0).getAnd().get(0).getValues();
   }
 }

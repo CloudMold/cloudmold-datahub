@@ -33,7 +33,7 @@ public class RemoveGroupResolverTest {
     _resolver = new RemoveGroupResolver(_entityClient, _groupService);
 
     when(_dataFetchingEnvironment.getArgument(eq("urn"))).thenReturn(GROUP_URN_STRING);
-    when(_groupService.getNativeGroupMembers(eq(GROUP_URN), any())).thenReturn(List.of(MEMBER_URN));
+    when(_groupService.getNativeGroupMembers(any(), eq(GROUP_URN))).thenReturn(List.of(MEMBER_URN));
   }
 
   @Test
@@ -54,7 +54,7 @@ public class RemoveGroupResolverTest {
     // The captured list must be read while the edges still exist — after deleteEntity the
     // key-aspect DELETE MCL leads to removeNode(), which reaps them.
     InOrder inOrder = inOrder(_groupService, _entityClient);
-    inOrder.verify(_groupService).getNativeGroupMembers(eq(GROUP_URN), any());
+    inOrder.verify(_groupService).getNativeGroupMembers(any(), eq(GROUP_URN));
     inOrder.verify(_entityClient).deleteEntity(any(), eq(GROUP_URN));
   }
 
@@ -101,10 +101,10 @@ public class RemoveGroupResolverTest {
   public void testDeleteStillSucceedsWhenCapturingMembersThrows() throws Exception {
     QueryContext mockContext = getMockAllowContext();
     when(_dataFetchingEnvironment.getContext()).thenReturn(mockContext);
-    // Simulates JavaGraphClient#getRelatedEntities blowing up on a single unparseable URN found
-    // in the graph index. Without isolating this capture, that would make the group permanently
-    // undeletable, since the same corrupt edge would be hit on every retry.
-    when(_groupService.getNativeGroupMembers(eq(GROUP_URN), any()))
+    // Simulates the member scroll blowing up on a single unparseable URN found in the graph
+    // index. Without isolating this capture, that would make the group permanently undeletable,
+    // since the same corrupt edge would be hit on every retry.
+    when(_groupService.getNativeGroupMembers(any(), eq(GROUP_URN)))
         .thenThrow(new RuntimeException("simulated corrupt graph edge"));
 
     assertTrue(_resolver.get(_dataFetchingEnvironment).join());

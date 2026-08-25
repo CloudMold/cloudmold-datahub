@@ -23,10 +23,18 @@ import com.linkedin.identity.GroupMembership;
 import com.linkedin.identity.NativeGroupMembership;
 import com.linkedin.identity.RoleMembership;
 import com.linkedin.metadata.Constants;
+import com.linkedin.metadata.aspect.models.graph.Edge;
+import com.linkedin.metadata.aspect.models.graph.RelatedEntities;
+import com.linkedin.metadata.aspect.models.graph.RelatedEntitiesScrollResult;
 import com.linkedin.metadata.entity.EntityService;
 import com.linkedin.metadata.graph.GraphClient;
+import com.linkedin.metadata.graph.GraphFilters;
+import com.linkedin.metadata.graph.GraphService;
 import com.linkedin.metadata.key.CorpGroupKey;
+import com.linkedin.metadata.query.filter.Criterion;
+import com.linkedin.metadata.query.filter.Filter;
 import com.linkedin.metadata.query.filter.RelationshipDirection;
+import com.linkedin.metadata.search.utils.QueryUtils;
 import com.linkedin.metadata.utils.EntityKeyUtils;
 import com.linkedin.mxe.MetadataChangeProposal;
 import com.linkedin.r2.RemoteInvocationException;
@@ -56,6 +64,10 @@ public class GroupService implements ActorGroupMembershipService {
           NATIVE_GROUP_MEMBERSHIP_ASPECT_NAME,
           ROLE_MEMBERSHIP_ASPECT_NAME);
   private static final int GROUP_MEMBER_PAGE_SIZE = 1000;
+  private static final String GROUP_MEMBER_SCROLL_KEEP_ALIVE = "5m";
+  // Members are looked up in chunks so the edge query stays a bounded terms lookup regardless of
+  // how many users a single request names.
+  private static final int MEMBER_EDGE_LOOKUP_CHUNK_SIZE = 500;
   private static final int RESTORE_INDICES_BATCH_SIZE = 100;
   private static final String GROUP_MEMBERSHIP_REPAIR_METRIC =
       "auth.group.native_group_membership_edge_repair";
@@ -65,18 +77,22 @@ public class GroupService implements ActorGroupMembershipService {
   private final SystemEntityClient _entityClient;
   private final EntityService<?> _entityService;
   private final GraphClient _graphClient;
+  private final GraphService _graphService;
 
   public GroupService(
       @Nonnull SystemEntityClient entityClient,
       @Nonnull EntityService<?> entityService,
-      @Nonnull GraphClient graphClient) {
+      @Nonnull GraphClient graphClient,
+      @Nonnull GraphService graphService) {
     Objects.requireNonNull(entityClient, "entityClient must not be null!");
     Objects.requireNonNull(entityService, "entityService must not be null!");
     Objects.requireNonNull(graphClient, "graphClient must not be null!");
+    Objects.requireNonNull(graphService, "graphService must not be null!");
 
     _entityClient = entityClient;
     _entityService = entityService;
     _graphClient = graphClient;
+    _graphService = graphService;
   }
 
   @Override
@@ -315,10 +331,7 @@ public class GroupService implements ActorGroupMembershipService {
       @Nonnull final Set<Urn> alreadyMembers,
       @Nonnull final Urn groupUrn) {
     try {
-      final Set<Urn> withEdge =
-          new HashSet<>(
-              getNativeGroupMembers(
-                  groupUrn, opContext.getSessionActorContext().getActorUrn().toString()));
+      final Set<Urn> withEdge = findMembersWithEdges(opContext, alreadyMembers, groupUrn);
       return alreadyMembers.stream()
           .filter(urn -> !withEdge.contains(urn))
           .collect(Collectors.toSet());
@@ -356,6 +369,17 @@ public class GroupService implements ActorGroupMembershipService {
     return groupInfo;
   }
 
+  /**
+   * Strips {@code groupUrn} from each listed user's {@code nativeGroupMembership}.
+   *
+   * <p>Best-effort by contract: one aspect read plus one synchronously indexed write per user,
+   * sequentially, with no batching, retry, or durable record of what remains. A caller that runs
+   * this outside the request thread — {@code RemoveGroupResolver} does, after a group delete — can
+   * lose the remainder of the list to a GMS restart mid-loop. The backstop is the repair in {@link
+   * #addUsersToNativeGroup}: a member left with a stale reference has it cleaned up the next time
+   * they are added to a group with that urn. Batching these writes and making the sweep resumable
+   * is worthwhile but out of scope here.
+   */
   public void removeExistingNativeGroupMembers(
       @Nonnull OperationContext opContext,
       @Nonnull final Urn groupUrn,
@@ -510,39 +534,103 @@ public class GroupService implements ActorGroupMembershipService {
    * Members whose {@code nativeGroupMembership} has materialized an {@code IsMemberOfNativeGroup}
    * edge to this group. Reads the graph index, so it reflects derived state rather than the
    * authoritative aspect — the two can disagree, which is precisely what callers check for.
+   *
+   * <p>Scrolls with search_after rather than from/size offsets. A group's membership is unbounded,
+   * and offset paging is rejected once {@code from + size} passes {@code index.max_result_window}
+   * (10k by default) — which fails the read outright rather than merely truncating it, so a caller
+   * treating failure as "no members" would silently lose the whole list for exactly the largest
+   * groups. {@code deleteEntityReferences} scrolls the same edges for the same reason.
    */
   public List<Urn> getNativeGroupMembers(
-      @Nonnull final Urn groupUrn, @Nonnull final String actorUrnStr) {
-    return getNativeGroupMembers(groupUrn, actorUrnStr, GROUP_MEMBER_PAGE_SIZE);
+      @Nonnull OperationContext opContext, @Nonnull final Urn groupUrn) {
+    return getNativeGroupMembers(opContext, groupUrn, GROUP_MEMBER_PAGE_SIZE);
   }
 
   @VisibleForTesting
   List<Urn> getNativeGroupMembers(
-      @Nonnull final Urn groupUrn, @Nonnull final String actorUrnStr, final int pageSize) {
+      @Nonnull OperationContext opContext, @Nonnull final Urn groupUrn, final int pageSize) {
     Objects.requireNonNull(groupUrn, "groupUrn must not be null");
-    Objects.requireNonNull(actorUrnStr, "actorUrnStr must not be null");
+    return scrollNativeGroupMemberEdges(opContext, groupUrn, null, pageSize);
+  }
+
+  /**
+   * Members of {@code groupUrn} drawn from {@code candidates} that have an {@code
+   * IsMemberOfNativeGroup} edge. Both endpoints are filtered in the query, so the cost tracks the
+   * number of candidates rather than the size of the group.
+   */
+  private Set<Urn> findMembersWithEdges(
+      @Nonnull OperationContext opContext,
+      @Nonnull final Collection<Urn> candidates,
+      @Nonnull final Urn groupUrn) {
+    final List<Urn> candidateList = new ArrayList<>(candidates);
+    final Set<Urn> withEdge = new HashSet<>();
+    for (int i = 0; i < candidateList.size(); i += MEMBER_EDGE_LOOKUP_CHUNK_SIZE) {
+      final List<Urn> chunk =
+          candidateList.subList(
+              i, Math.min(i + MEMBER_EDGE_LOOKUP_CHUNK_SIZE, candidateList.size()));
+      withEdge.addAll(
+          scrollNativeGroupMemberEdges(opContext, groupUrn, chunk, MEMBER_EDGE_LOOKUP_CHUNK_SIZE));
+    }
+    return withEdge;
+  }
+
+  /**
+   * @param candidates when non-null, restricts the far side of the edge to these users; when null,
+   *     every member of the group is returned
+   */
+  private List<Urn> scrollNativeGroupMemberEdges(
+      @Nonnull OperationContext opContext,
+      @Nonnull final Urn groupUrn,
+      @Nullable final Collection<Urn> candidates,
+      final int pageSize) {
+    final Filter memberFilter;
+    if (candidates == null) {
+      memberFilter = QueryUtils.EMPTY_FILTER;
+    } else {
+      final Criterion criterion =
+          QueryUtils.newCriterion(
+              "urn", candidates.stream().map(Urn::toString).collect(Collectors.toList()));
+      if (criterion == null) {
+        return List.of();
+      }
+      memberFilter = QueryUtils.newFilter(criterion);
+    }
+
+    final GraphFilters graphFilters =
+        new GraphFilters(
+            QueryUtils.newFilter("urn", groupUrn.toString()),
+            memberFilter,
+            null,
+            null,
+            Set.of(IS_MEMBER_OF_NATIVE_GROUP_RELATIONSHIP_NAME),
+            QueryUtils.newRelationshipFilter(
+                QueryUtils.EMPTY_FILTER, RelationshipDirection.INCOMING));
 
     final List<Urn> members = new ArrayList<>();
-    int start = 0;
-    int total = 0;
+    String scrollId = null;
     do {
-      final EntityRelationships relationships =
-          _graphClient.getRelatedEntities(
-              groupUrn.toString(),
-              ImmutableSet.of(IS_MEMBER_OF_NATIVE_GROUP_RELATIONSHIP_NAME),
-              RelationshipDirection.INCOMING,
-              start,
+      final RelatedEntitiesScrollResult result =
+          _graphService.scrollRelatedEntities(
+              opContext,
+              graphFilters,
+              Edge.EDGE_SORT_CRITERION,
+              scrollId,
+              GROUP_MEMBER_SCROLL_KEEP_ALIVE,
               pageSize,
-              actorUrnStr);
-      if (relationships == null || relationships.getRelationships() == null) {
+              null,
+              null);
+      // An empty page also terminates the loop: with search_after there is nothing beyond it, and
+      // trusting the scrollId alone would spin forever on a backend that always returns one.
+      if (result == null || result.getEntities() == null || result.getEntities().isEmpty()) {
         break;
       }
-      relationships
-          .getRelationships()
-          .forEach(relationship -> members.add(relationship.getEntity()));
-      total = relationships.getTotal();
-      start += pageSize;
-    } while (start < total);
+      // Direction is INCOMING, so the related urn is the member rather than the group.
+      result.getEntities().stream()
+          .map(RelatedEntities::getUrn)
+          .map(UrnUtils::getUrn)
+          .forEach(members::add);
+      scrollId = result.getScrollId();
+    } while (scrollId != null);
 
     return members;
   }

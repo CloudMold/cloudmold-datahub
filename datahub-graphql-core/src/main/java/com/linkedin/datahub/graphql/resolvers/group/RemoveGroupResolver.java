@@ -91,7 +91,7 @@ public class RemoveGroupResolver implements DataFetcher<CompletableFuture<Boolea
 
   private List<Urn> captureMembersBeforeDelete(final QueryContext context, final Urn groupUrn) {
     try {
-      return _groupService.getNativeGroupMembers(groupUrn, context.getActorUrn());
+      return _groupService.getNativeGroupMembers(context.getOperationContext(), groupUrn);
     } catch (Exception e) {
       log.warn(
           "Failed to capture native group members for group {} before delete; member-side "
