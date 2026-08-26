@@ -16,6 +16,8 @@ interface Props {
     placeholder?: string;
     searchPlaceholder?: string;
     orFilters?: AndFilterInput[];
+    /** Entity to show as already selected. Callers that resolve it asynchronously may pass it late. */
+    initialValue?: Entity;
     onUpdate?: (entity: Entity | undefined) => void;
 }
 
@@ -25,7 +27,14 @@ interface Props {
  *
  * Version 2 uses the component library, has different styling of entities, and only supports single selection.
  */
-export const EntitySearchInputV2 = ({ entityTypes, placeholder, searchPlaceholder, orFilters, onUpdate }: Props) => {
+export const EntitySearchInputV2 = ({
+    entityTypes,
+    placeholder,
+    searchPlaceholder,
+    orFilters,
+    initialValue,
+    onUpdate,
+}: Props) => {
     const { t } = useTranslation('entity.shared.selectors');
     // Suggestions when user hasn't provided a search query
     const { data: searchResults } = useGetSearchResultsForMultipleQuery({
@@ -73,6 +82,7 @@ export const EntitySearchInputV2 = ({ entityTypes, placeholder, searchPlaceholde
 
     return (
         <AutoCompleteSelect<Entity>
+            initialValue={initialValue ? { value: initialValue.urn, data: initialValue } : undefined}
             emptySuggestions={emptySuggestions}
             autoCompleteSuggestions={autoCompleteSuggestions}
             render={(entity) => <EntitySearchInputResultV2 entity={entity} />}

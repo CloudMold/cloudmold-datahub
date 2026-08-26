@@ -1,5 +1,6 @@
 import { CopyOutlined } from '@ant-design/icons';
 import { PencilSimple } from '@phosphor-icons/react/dist/csr/PencilSimple';
+import { Prohibit } from '@phosphor-icons/react/dist/csr/Prohibit';
 import { Trash } from '@phosphor-icons/react/dist/csr/Trash';
 import { Dropdown, Menu } from 'antd';
 import React, { useState } from 'react';
@@ -10,13 +11,14 @@ import styled from 'styled-components/macro';
 import { useUserContext } from '@app/context/useUserContext';
 import { useEntityData, useRefetch, useRouteToTab } from '@app/entity/shared/EntityContext';
 import { MenuIcon } from '@app/entityV2/shared/EntityDropdown/EntityMenuActions';
+import { useUndeprecateResource } from '@app/entityV2/shared/EntityDropdown/useUndeprecateResource';
 import DeleteLogicalModelColumnButton from '@app/entityV2/shared/logicalModels/DeleteLogicalModelColumnButton';
 import EditLogicalModelColumnModal from '@app/entityV2/shared/logicalModels/EditLogicalModelColumnModal';
 import { isLogicalModel } from '@app/entityV2/shared/logicalModels/logicalModels.utils';
 import { generateSchemaFieldUrn } from '@app/entityV2/shared/tabs/Lineage/utils';
 import { useAppConfig } from '@app/useAppConfig';
 
-import { SchemaField, SchemaFieldDataType } from '@types';
+import { SchemaField, SchemaFieldDataType, SubResourceType } from '@types';
 
 const LINEAGE_TAB = 'Lineage';
 
@@ -45,6 +47,7 @@ interface Props {
 export default function MenuColumn({ field }: Props) {
     const { t } = useTranslation('entity.profile.schema');
     const { t: tl } = useTranslation('logicalModels');
+    const { t: te } = useTranslation('entity.shared.entityDropdown');
     const routeToTab = useRouteToTab();
     const { urn, entityType, entityData } = useEntityData();
     const refetch = useRefetch();
@@ -58,6 +61,14 @@ export default function MenuColumn({ field }: Props) {
     const childCount = entityData?.physicalChildren?.total ?? 0;
     const [editOpen, setEditOpen] = useState(false);
     const [deleteOpen, setDeleteOpen] = useState(false);
+
+    const isDeprecated = !!field.schemaFieldEntity?.deprecation?.deprecated;
+    const undeprecateField = useUndeprecateResource({
+        urn,
+        subResource: field.fieldPath,
+        subResourceType: SubResourceType.DatasetField,
+        refetch,
+    });
 
     return (
         <>
@@ -98,6 +109,13 @@ export default function MenuColumn({ field }: Props) {
                             <Menu.Item key="4" onClick={(e) => e.domEvent.stopPropagation()}>
                                 <MenuItem onClick={() => setDeleteOpen(true)} data-testid="delete-logical-model-column">
                                     <Trash size={16} /> &nbsp; {tl('deleteColumn.menuLabel')}
+                                </MenuItem>
+                            </Menu.Item>
+                        )}
+                        {isDeprecated && (
+                            <Menu.Item key="5" onClick={(e) => e.domEvent.stopPropagation()}>
+                                <MenuItem onClick={() => undeprecateField()} data-testid="un-deprecate-column">
+                                    <Prohibit size={16} /> &nbsp; {te('deprecation.markUnDeprecated')}
                                 </MenuItem>
                             </Menu.Item>
                         )}

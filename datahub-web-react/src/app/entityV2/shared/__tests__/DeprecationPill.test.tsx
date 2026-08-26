@@ -1,6 +1,7 @@
 import { MockedProvider } from '@apollo/client/testing';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import React from 'react';
+import { MemoryRouter } from 'react-router-dom';
 
 import { DeprecationIcon } from '@app/entityV2/shared/components/styled/DeprecationIcon';
 import CustomThemeProvider from '@src/CustomThemeProvider';
@@ -15,25 +16,28 @@ describe('DeprecationPill', () => {
         refetch: vi.fn(),
     };
 
-    it('correctly converts v2 schema field replacement path', async () => {
+    // A schema field replacement renders a router Link to its parent's columns.
+    const renderPill = (deprecation: any) =>
         render(
             <MockedProvider>
                 <CustomThemeProvider>
-                    <DeprecationIcon
-                        {...defaultProps}
-                        deprecation={{
-                            note: 'Deprecating this field',
-                            decommissionTime: null,
-                            deprecated: true,
-                            replacement: {
-                                urn: 'urn:li:schemaField:(urn:li:dataset:(urn:li:dataPlatform:hive,db.schema.table,PROD),[version=2.0].[key=True].parent.[type=struct].child.[type=string])',
-                                type: EntityType.SchemaField,
-                            },
-                        }}
-                    />
+                    <MemoryRouter>
+                        <DeprecationIcon {...defaultProps} deprecation={deprecation} />
+                    </MemoryRouter>
                 </CustomThemeProvider>
             </MockedProvider>,
         );
+
+    it('correctly converts v2 schema field replacement path', async () => {
+        renderPill({
+            note: 'Deprecating this field',
+            decommissionTime: null,
+            deprecated: true,
+            replacement: {
+                urn: 'urn:li:schemaField:(urn:li:dataset:(urn:li:dataPlatform:hive,db.schema.table,PROD),[version=2.0].[key=True].parent.[type=struct].child.[type=string])',
+                type: EntityType.SchemaField,
+            },
+        });
 
         const pill = screen.getByText('Deprecated');
         fireEvent.mouseEnter(pill);
@@ -43,21 +47,12 @@ describe('DeprecationPill', () => {
     });
 
     it('shows note and decommission time when both present', async () => {
-        render(
-            <MockedProvider>
-                <CustomThemeProvider>
-                    <DeprecationIcon
-                        {...defaultProps}
-                        deprecation={{
-                            note: 'This is deprecated',
-                            decommissionTime: 1735689600, // Jan 1, 2025
-                            deprecated: true,
-                            replacement: null,
-                        }}
-                    />
-                </CustomThemeProvider>
-            </MockedProvider>,
-        );
+        renderPill({
+            note: 'This is deprecated',
+            decommissionTime: 1735689600, // Jan 1, 2025
+            deprecated: true,
+            replacement: null,
+        });
 
         const pill = screen.getByText('Deprecated');
         fireEvent.mouseEnter(pill);
@@ -68,21 +63,7 @@ describe('DeprecationPill', () => {
     });
 
     it('shows "No additional details" when no details provided', async () => {
-        render(
-            <MockedProvider>
-                <CustomThemeProvider>
-                    <DeprecationIcon
-                        {...defaultProps}
-                        deprecation={{
-                            note: '',
-                            decommissionTime: null,
-                            deprecated: true,
-                            replacement: null,
-                        }}
-                    />
-                </CustomThemeProvider>
-            </MockedProvider>,
-        );
+        renderPill({ note: '', decommissionTime: null, deprecated: true, replacement: null });
 
         const pill = screen.getByText('Deprecated');
         fireEvent.mouseEnter(pill);

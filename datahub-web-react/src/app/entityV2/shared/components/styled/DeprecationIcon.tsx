@@ -1,21 +1,29 @@
-import { Text, Tooltip, toast } from '@components';
+import { Text, Tooltip, typography } from '@components';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 import styled from 'styled-components';
 
-import analytics, { EventType } from '@app/analytics';
+import type { GenericEntityProperties } from '@app/entity/shared/types';
+import { getSchemaFieldParentLink } from '@app/entityV2/schemaField/utils';
+import { useUndeprecateResource } from '@app/entityV2/shared/EntityDropdown/useUndeprecateResource';
 import MarkAsDeprecatedButton from '@app/entityV2/shared/components/styled/MarkAsDeprecatedButton';
 import { EntityLink } from '@app/homeV2/reference/sections/EntityLink';
+import { getSourceUrnFromSchemaFieldUrn } from '@app/lineage/utils/columnLineageUtils';
 import { getV1FieldPathFromSchemaFieldUrn } from '@app/lineageV3/utils/lineageUtils';
 import { decommissionTimeToSeconds, toLocalDateString } from '@app/shared/time/timeUtils';
 import { ConfirmationModal } from '@app/sharedV2/modals/ConfirmationModal';
+import { useEntityRegistry } from '@app/useEntityRegistry';
 import { StructuredPopover } from '@src/alchemy-components/components/StructuredPopover';
 import dayjs from '@utils/dayjs';
 
-import { useBatchUpdateDeprecationMutation } from '@graphql/mutations.generated';
+import { useGetEntitiesQuery } from '@graphql/entity.generated';
 import { Deprecation, SubResourceType } from '@types';
 
 import DeprecatedIcon from '@images/deprecated-status.svg?react';
+
+const SCHEMA_FIELD_PREFIX = 'urn:li:schemaField:';
+const DATASET_URN_PREFIX = 'urn:li:dataset:';
 
 const DeprecatedContainer = styled.div`
     display: flex;
@@ -58,6 +66,36 @@ const ReplacementContainer = styled.span`
     max-width: 100%;
 `;
 
+// The label and the value have to match, so the size is declared once here and everything in the
+// row inherits it — including the alchemy Text, via size="inherit".
+const ReplacementRow = styled.div`
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    overflow: hidden;
+    font-size: ${typography.fontSizes.sm};
+`;
+
+const ReplacementLabel = styled(Text).attrs({
+    size: 'inherit',
+    color: 'textSecondary',
+    type: 'span',
+})`
+    flex-shrink: 0;
+`;
+
+const ReplacementLink = styled(Link)`
+    color: ${(props) => props.theme.colors.textSecondary};
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+
+    &:hover {
+        color: ${(props) => props.theme.colors.textBrand};
+    }
+`;
+
 const ThinDivider = styled.hr`
     margin: 8px 0;
     border: none;
@@ -98,7 +136,7 @@ export const DeprecationIcon = ({
     popoverPlacement = 'bottom',
 }: Props) => {
     const { t } = useTranslation('entity.shared.components');
-    const [batchUpdateDeprecationMutation] = useBatchUpdateDeprecationMutation();
+    const entityRegistry = useEntityRegistry();
     const [showUndeprecateModal, setShowUndeprecateModal] = useState(false);
 
     const decommissionTimeSeconds = deprecation.decommissionTime
@@ -113,39 +151,47 @@ export const DeprecationIcon = ({
     const decommissionTimeGMT =
         decommissionTimeSeconds && dayjs.unix(decommissionTimeSeconds).utc().format('dddd, DD/MMM/YYYY HH:mm:ss z');
 
-    const hasDetails = deprecation.note !== '' || deprecation.decommissionTime !== null;
+    const hasDetails = deprecation.note !== '' || deprecation.decommissionTime !== null || !!deprecation.replacement;
     const isDividerNeeded = deprecation.note !== '' && deprecation.decommissionTime !== null;
 
+    const undeprecate = useUndeprecateResource({ urn, subResource, subResourceType, refetch });
+
     const batchUndeprecate = () => {
-        batchUpdateDeprecationMutation({
-            variables: {
-                input: {
-                    resources: [{ resourceUrn: urn, subResource, subResourceType }],
-                    deprecated: false,
-                },
-            },
-        })
-            .then(({ errors }) => {
-                if (!errors) {
-                    toast.success(t('deprecation.markedUnDeprecatedSuccess'), { duration: 2 });
-                    refetch?.();
-                    analytics.event({
-                        type: EventType.SetDeprecation,
-                        entityUrns: [urn],
-                        deprecated: false,
-                        resources: subResource ? [{ resourceUrn: urn, subResource, subResourceType }] : undefined,
-                    });
-                }
-                setShowUndeprecateModal(false);
-            })
-            .catch((e) => {
-                toast.destroy();
-                toast.error(t('deprecation.markUnDeprecatedError', { message: e.message || '' }), { duration: 3 });
-            });
+        undeprecate().finally(() => setShowUndeprecateModal(false));
     };
 
-    const isReplacementSchemaField = deprecation?.replacement?.urn?.startsWith('urn:li:schemaField');
+    const replacementColumnUrn = deprecation?.replacement?.urn?.startsWith(SCHEMA_FIELD_PREFIX)
+        ? deprecation.replacement.urn
+        : undefined;
     const isSubResource = subResourceType === SubResourceType.DatasetField;
+
+    // A replacement column may live in a different asset than the deprecated one, so the field path
+    // on its own is ambiguous. The urn carries the parent, but the deprecation aspect doesn't
+    // resolve it, hence the lookup — skipped entirely for the far more common asset replacement.
+    const replacementColumnParentUrn = replacementColumnUrn
+        ? getSourceUrnFromSchemaFieldUrn(replacementColumnUrn)
+        : undefined;
+    const { data: replacementParentData } = useGetEntitiesQuery({
+        variables: {
+            urns: [replacementColumnParentUrn || ''],
+        },
+        skip: !replacementColumnParentUrn,
+    });
+    // The generated query type narrows nested aspects to the fragment's selections, which no longer
+    // structurally match the full types GenericEntityProperties is built from.
+    const replacementParent = replacementParentData?.entities?.[0] as GenericEntityProperties | undefined;
+
+    const replacementParentName =
+        replacementParent?.type && entityRegistry.getDisplayName(replacementParent.type, replacementParent);
+    const replacementColumnLabel = replacementColumnUrn
+        ? [replacementParentName, getV1FieldPathFromSchemaFieldUrn(replacementColumnUrn)].filter(Boolean).join('.')
+        : '';
+    // getSchemaFieldParentLink only knows the dataset route, and a glossary term carries
+    // schemaMetadata too, so a column on anything else is shown unlinked rather than linked nowhere.
+    const replacementColumnLink =
+        replacementColumnUrn && replacementColumnParentUrn?.startsWith(DATASET_URN_PREFIX)
+            ? getSchemaFieldParentLink(replacementColumnUrn)
+            : undefined;
 
     return (
         <StructuredPopover
@@ -158,20 +204,6 @@ export const DeprecationIcon = ({
                         <DeprecatedTitle>
                             {isSubResource ? t('deprecation.columnDeprecated') : t('deprecation.assetDeprecated')}
                         </DeprecatedTitle>
-                        {deprecation.replacement && (
-                            <DeprecatedSubTitle>
-                                <Text size="sm" weight="bold" color="text" type="div">
-                                    {t('deprecation.replacementLabel')}
-                                </Text>
-                                {isReplacementSchemaField ? (
-                                    <ReplacementContainer>
-                                        {getV1FieldPathFromSchemaFieldUrn(deprecation.replacement.urn)}
-                                    </ReplacementContainer>
-                                ) : (
-                                    <EntityLink entity={deprecation.replacement} />
-                                )}
-                            </DeprecatedSubTitle>
-                        )}
                         {deprecation?.note && (
                             <DeprecatedSubTitle>
                                 <Text size="sm" weight="bold" color="text" type="div">
@@ -186,6 +218,22 @@ export const DeprecationIcon = ({
                             <Tooltip placement="right" title={decommissionTimeGMT}>
                                 <LastEvaluatedAtLabel>{decommissionTimeLocal}</LastEvaluatedAtLabel>
                             </Tooltip>
+                        )}
+                        {/* Kept last, and dimmer than the rest, so it reads as a footnote. */}
+                        {!!deprecation.replacement && (
+                            <ReplacementRow>
+                                <ReplacementLabel>{t('deprecation.replacementLabel')}</ReplacementLabel>
+                                {/* eslint-disable-next-line no-nested-ternary */}
+                                {replacementColumnLink ? (
+                                    <ReplacementLink to={replacementColumnLink}>
+                                        {replacementColumnLabel}
+                                    </ReplacementLink>
+                                ) : replacementColumnUrn ? (
+                                    <ReplacementContainer>{replacementColumnLabel}</ReplacementContainer>
+                                ) : (
+                                    <EntityLink entity={deprecation.replacement} />
+                                )}
+                            </ReplacementRow>
                         )}
                         {isDividerNeeded && showUndeprecate ? <ThinDivider /> : null}
                         {showUndeprecate && (

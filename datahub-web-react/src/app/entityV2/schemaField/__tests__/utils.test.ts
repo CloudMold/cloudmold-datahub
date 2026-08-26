@@ -23,4 +23,17 @@ describe('schema field utils', () => {
     it('should get the field path from a schema field urn properly', () => {
         expect(getFieldPathFromSchemaFieldUrn(schemaFieldUrn)).toBe('profile_id');
     });
+
+    // Glossary terms carry schemaMetadata too, and their urns have no parentheses of their own.
+    describe('parent urn without parentheses', () => {
+        const glossaryTermFieldUrn = 'urn:li:schemaField:(urn:li:glossaryTerm:my_term,term_col_a)';
+
+        it('should get the source urn from a schema field urn properly', () => {
+            expect(getSourceUrnFromSchemaFieldUrn(glossaryTermFieldUrn)).toBe('urn:li:glossaryTerm:my_term');
+        });
+
+        it('should get the field path from a schema field urn properly', () => {
+            expect(getFieldPathFromSchemaFieldUrn(glossaryTermFieldUrn)).toBe('term_col_a');
+        });
+    });
 });

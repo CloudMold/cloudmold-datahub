@@ -55,6 +55,8 @@ type Props<T> = Pick<
     | 'optionListTestId'
 > & {
     render: (data: T) => React.ReactNode;
+    /** Pre-selected suggestion. May resolve asynchronously, and is synced whenever its value changes. */
+    initialValue?: Suggestion<T>;
     emptySuggestions?: Suggestion<T>[];
     autoCompleteSuggestions?: Suggestion<T>[];
     onSearch: (query: string) => void;
@@ -66,6 +68,7 @@ type Props<T> = Pick<
 
 export default function AutoCompleteSelect<T>({
     render,
+    initialValue,
     emptySuggestions,
     autoCompleteSuggestions,
     onSearch,
@@ -88,7 +91,7 @@ export default function AutoCompleteSelect<T>({
     const { t: tc } = useTranslation('common.actions');
     const resolvedPlaceholder = placeholder ?? t('select.placeholder');
     const [query, setQuery] = useState('');
-    const [selectedValue, setSelectedValue] = useState<Suggestion<T> | undefined>(undefined);
+    const [selectedValue, setSelectedValue] = useState<Suggestion<T> | undefined>(initialValue);
     const selectRef = useRef<HTMLDivElement>(null);
     const dropdownRef = useRef<HTMLDivElement>(null);
     const {
@@ -97,6 +100,14 @@ export default function AutoCompleteSelect<T>({
         close: closeDropdown,
         toggle: toggleDropdown,
     } = useSelectDropdown(false, selectRef, dropdownRef);
+
+    // Callers may only be able to resolve the pre-selection after a fetch, so adopt it when it
+    // arrives. Keyed on the value rather than the object so a re-rendered caller doesn't overwrite
+    // whatever the user has since picked.
+    useEffect(() => {
+        if (initialValue) setSelectedValue(initialValue);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [initialValue?.value]);
 
     const handleSelectClick = useCallback(() => {
         if (!isDisabled && !isReadOnly) {
@@ -203,8 +214,9 @@ export default function AutoCompleteSelect<T>({
                             fontSize={size}
                             showClear
                         />
+                        {/* Nested inside SelectBase because antd's Dropdown takes a single child. */}
+                        <input type="hidden" name={name} value={selectedValue?.value || ''} readOnly />
                     </SelectBase>
-                    <input type="hidden" name={name} value={selectedValue?.value || ''} readOnly />
                 </Dropdown>
             )}
         </Container>
